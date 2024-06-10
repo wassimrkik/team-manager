@@ -1,0 +1,74 @@
+name: Test
+on:
+    push:
+        branches: 
+            - main
+    pull_request:
+
+
+jobs:
+    TEST:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v3
+
+            - name: Get Token
+              id: github-app
+              uses: peter-murray/workflow-application-token-action@v1
+              with:
+                  application_id: ${{ secrets.ONBOARDING_APPLICATION_ID }}
+                  application_private_key: ${{ secrets.ONBOARDING_APPLICATION_PRIVATE_KEY }}
+                  organization: ${{ secrets.ONBOARDING_APPLICATION_ORGANIZATION }}
+
+            - name: Install terraform
+              run: |
+                release=`curl -s https://api.github.com/repos/hashicorp/terraform/releases/latest |  grep tag_name | cut -d: -f2 | tr -d \"\,\v | awk '{$1=$1};1'`
+                wget https://releases.hashicorp.com/terraform/${release}/terraform_${release}_linux_amd64.zip
+                unzip terraform_${release}_linux_amd64.zip
+                sudo mv terraform /usr/bin/terraform
+
+            - name: Terraform init
+              id: init
+              run: terraform init  
+
+            - name: Terraform Plan
+              id: plan
+              env:
+                TF_VAR_onboarding_pat: ${{ steps.github-app.outputs.token }}
+              if: github.event_name == 'pull_request'
+              run: |
+                echo $TF_VAR_onboarding_pat
+                terraform plan -no-color
+              continue-on-error: true
+
+            - uses: actions/github-script@0.9.0
+              if: github.event_name == 'pull_request'
+              env:
+                PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+              with:
+                github-token: ${{ steps.github-app.outputs.token }}
+                script: |
+                    const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+                    #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+                    #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+                    <details><summary>Show Plan</summary>
+                    \`\`\`${process.env.PLAN}\`\`\`
+                    </details>
+                    *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+                    github.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: output
+                    })
+
+            - name: Terraform Plan Status
+              if: steps.plan.outcome == 'failure'
+              run: exit 1
+
+            - name: Terraform Apply
+              env:
+                TF_VAR_onboarding_pat: ${{ steps.github-app.outputs.token }}
+              if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+              run: terraform apply -auto-approve
